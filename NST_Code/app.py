@@ -5,22 +5,17 @@ from flask_wtf import FlaskForm
 from flask_bootstrap import Bootstrap
 from werkzeug.utils import secure_filename
 from wtforms import FileField, SubmitField, FloatField, HiddenField
-from wtforms.validators import InputRequired
 from PIL import Image
 from torchvision import transforms
-import io
 
-# Import your existing AdaIN code
 from utils.models import VGGEncoder, Decoder
-from utils.utils import adaptive_instance_normalization, calc_mean_std
-
+from utils.utils import adaptive_instance_normalization
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
 Bootstrap(app)
-
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 class UploadForm(FlaskForm):
@@ -33,51 +28,42 @@ class UploadForm(FlaskForm):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-encoder = VGGEncoder('vgg_normalised.pth').to(device)
+encoder = VGGEncoder('vgg_normalised.pth', device=device).to(device)
 decoder = Decoder().to(device)
-decoder.load_state_dict(torch.load('experiment/final_exp/decoder_final.pth'))
 
+checkpoint_path = 'experiment/final_exp/decoder_final.pth'
+checkpoint = torch.load(checkpoint_path, map_location=device)
+
+if isinstance(checkpoint, dict) and ('state_dict' in checkpoint or 'model' in checkpoint):
+    state = checkpoint.get('state_dict', checkpoint.get('model'))
+else:
+    state = checkpoint
+
+decoder.load_state_dict(state)
 encoder.eval()
 decoder.eval()
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
-    content_transform = transforms.Compose([
+    transform = transforms.Compose([
         transforms.Resize(512),
         transforms.ToTensor()
     ])
-
-    style_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.ToTensor()
-    ])
-    content_image = content_transform(content_image).unsqueeze(0).to(device)
-    style_image = style_transform(style_image).unsqueeze(0).to(device)
-
+    content_image = transform(content_image).unsqueeze(0).to(device)
+    style_image = transform(style_image).unsqueeze(0).to(device)
     with torch.no_grad():
         content_feats = encoder(content_image, is_test=True)
         style_feats = encoder(style_image, is_test=True)
-
         stylized_feats = adaptive_instance_normalization(content_feats, style_feats)
-
         stylized_feats = alpha * stylized_feats + (1 - alpha) * content_feats
-
         stylized_image = decoder(stylized_feats)
-
     return stylized_image
 
-
 def save_image(image, path):
-    image = image.cpu().clone()
-    image = image.squeeze(0)
-    image = image.clamp(0, 1)
-    image = transforms.ToPILImage()(image)
-    image.save(path)
-
-
+    image = image.cpu().clone().squeeze(0).clamp(0, 1)
+    transforms.ToPILImage()(image).save(path)
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -107,47 +93,45 @@ def index():
         if content_filename and style_filename:
             content_path = os.path.join(app.config['UPLOAD_FOLDER'], content_filename)
             style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
-            
             try:
                 content_image = Image.open(content_path).convert('RGB')
                 style_image = Image.open(style_path).convert('RGB')
-
                 alpha = float(form.alpha.data)
                 stylized_image = style_transfer(content_image, style_image, encoder, decoder, alpha, device)
-
                 result_filename = 'stylized_' + content_filename
                 result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
                 save_image(stylized_image, result_path)
-                
                 result_image = result_filename
             except Exception as e:
                 error = str(e)
+        else:
+            if not content_filename:
+                error = 'Please upload content image'
+            if not style_filename:
+                error = 'Please upload style image'
     else:
         if not content_filename:
             error = 'Please upload content image'
         if not style_filename:
             error = 'Please upload style image'
 
-    return render_template('index.html', form=form, result_image=result_image, content_image=content_filename,
-                           style_image=style_filename, error=error)
-
+    return render_template(
+        'index.html',
+        form=form,
+        result_image=result_image,
+        content_image=content_filename,
+        style_image=style_filename,
+        error=error
+    )
 
 @app.route('/uploads/<filename>')
 def send_image(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-
 @app.route('/examples/<path:filename>')
 def send_example(filename):
     return send_from_directory('examples', filename)
 
-
 if __name__ == '__main__':
     from werkzeug.serving import run_simple
     run_simple('localhost', 5000, app, use_reloader=True, use_debugger=True)
-
-
-
-
-
-
