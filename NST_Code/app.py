@@ -138,59 +138,54 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
-    """Execute style transfer with memory management"""
     try:
         logger.info("Starting style transfer...")
-        
-        # Resize to fixed size to reduce memory
+
         transform = transforms.Compose([
             transforms.Resize((128, 128)),
             transforms.ToTensor()
         ])
-        
+
+        logger.info("Converting content image to tensor...")
         content_tensor = transform(content_image).unsqueeze(0).to(device)
+
+        logger.info("Converting style image to tensor...")
         style_tensor = transform(style_image).unsqueeze(0).to(device)
-        
-        logger.info(f"Content shape: {content_tensor.shape}, Style shape: {style_tensor.shape}")
-        
-        # Clear GPU cache before processing
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
-            logger.debug(f"GPU memory before: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-        
-        with torch.no_grad():
-            logger.debug("Encoding content...")
+
+        logger.info(f"Content shape: {content_tensor.shape}")
+        logger.info(f"Style shape: {style_tensor.shape}")
+
+        with torch.inference_mode():
+            logger.info("Encoding content...")
             content_feats = encoder(content_tensor, is_test=True)
-            
-            logger.debug("Encoding style...")
+            logger.info("Content encoded")
+
+            logger.info("Encoding style...")
             style_feats = encoder(style_tensor, is_test=True)
-            
-            logger.debug("Applying AdaIN...")
-            stylized_feats = adaptive_instance_normalization(content_feats, style_feats)
-            stylized_feats = alpha * stylized_feats + (1 - alpha) * content_feats
-            
-            logger.debug("Decoding...")
+            logger.info("Style encoded")
+
+            logger.info("Applying AdaIN...")
+            stylized_feats = adaptive_instance_normalization(
+                content_feats,
+                style_feats
+            )
+
+            stylized_feats = (
+                alpha * stylized_feats +
+                (1 - alpha) * content_feats
+            )
+
+            logger.info("Decoding...")
             stylized_image = decoder(stylized_feats)
-        
-        logger.info("✓ Style transfer completed")
-        
-        # Clear GPU cache after processing
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
-            logger.debug(f"GPU memory after: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-        
+
+        logger.info("Style transfer completed")
+
         return stylized_image
-        
-    except RuntimeError as e:
-        logger.error(f"CUDA/Memory error: {e}")
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
-        raise Exception(f"Memory error: {str(e)}")
+
     except Exception as e:
         logger.error(f"Style transfer error: {e}")
         logger.error(traceback.format_exc())
         raise
-
 def save_image(image, path):
     """Save tensor to image file"""
     try:
