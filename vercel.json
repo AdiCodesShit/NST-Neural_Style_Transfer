@@ -1,19 +1,14 @@
 {
-  "build": {
-    "env": {
-      "PYTHON_VERSION": "3.12"
-    }
-  },
   "builds": [
     {
-      "src": "NST_Code/app.py",
+      "src": "app.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "NST_Code/app.py"
+      "dest": "app.py"
     }
   ]
 }
