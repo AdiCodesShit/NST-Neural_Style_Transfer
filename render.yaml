@@ -1,0 +1,9 @@
+[build]
+# Tell Render to build with Python 3.10+
+python = "3.10"
+
+[[redirects]]
+# Ensure all routes go to Flask
+from = "/*"
+to = "/index.html"
+status = 200
