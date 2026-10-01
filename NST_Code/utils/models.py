@@ -2,8 +2,11 @@ import torch.nn as nn
 import torch
 
 class VGGEncoder(nn.Module):
-    def __init__(self, vgg_path):
+    def __init__(self, vgg_path, device=None):
         super(VGGEncoder, self).__init__()
+
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.vgg = nn.Sequential(
             nn.Conv2d(3, 3, (1, 1)),
@@ -60,7 +63,8 @@ class VGGEncoder(nn.Module):
             nn.Conv2d(512, 512, (3, 3)),
             nn.ReLU()  # relu5-4
         )
-        self.vgg.load_state_dict(torch.load(vgg_path))
+        # Load the VGG weights safely onto the chosen device
+        self.vgg.load_state_dict(torch.load(vgg_path, map_location=device))
         self.vgg = nn.Sequential(*list(self.vgg.children())[:31])
         enc_layers = list(self.vgg.children())
         self.enc_1 = nn.Sequential(*enc_layers[:4])
@@ -119,8 +123,3 @@ class Decoder(nn.Module):
 
     def forward(self, input):
         return self.net(input)
-
-
-
-
-
