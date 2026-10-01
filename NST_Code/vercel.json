@@ -10,10 +10,5 @@
       "src": "/(.*)",
       "dest": "app.py"
     }
-  ],
-  "functions": {
-    "app.py": {
-      "excludeFiles": "content_data/**|style_data/**|experiment/final_exp/sample_iter_*.png|experiment/final_exp/options.txt|train.py|.vscode/**|**/__pycache__/**|Procfile|Procfile.txt|render.yaml|README.md"
-    }
-  }
+  ]
 }
