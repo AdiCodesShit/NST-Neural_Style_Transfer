@@ -48,7 +48,7 @@ def allowed_file(filename):
 
 def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
     transform = transforms.Compose([
-        transforms.Resize(512),
+        transforms.Resize((256,256)),
         transforms.ToTensor()
     ])
     content_image = transform(content_image).unsqueeze(0).to(device)
