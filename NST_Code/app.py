@@ -1,322 +1,426 @@
 import os
 import sys
-import torch
-from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify
-from flask_wtf import FlaskForm
-from flask_bootstrap import Bootstrap
-from werkzeug.utils import secure_filename
-from wtforms import FileField, SubmitField, FloatField, HiddenField
-from PIL import Image
-from torchvision import transforms
 import logging
 import traceback
 
-# Configure logging for Render
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
-
-logger.info("=" * 80)
-logger.info("Starting NST Flask App Initialization")
-logger.info("=" * 80)
+import numpy as np
+import torch
+from flask import Flask, render_template, request, send_from_directory, flash, redirect, url_for
+from flask_bootstrap import Bootstrap
+from flask_wtf import FlaskForm
+from werkzeug.utils import secure_filename
+from wtforms import FileField, SubmitField
+from wtforms.validators import DataRequired
+from PIL import Image
 
 from utils.models import VGGEncoder, Decoder
 from utils.utils import adaptive_instance_normalization
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'supersecretkey'
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static")
+)
+
+app.config["SECRET_KEY"] = os.environ.get(
+    "SECRET_KEY",
+    "neural-style-transfer-secret-key"
+)
+
+app.config["UPLOAD_FOLDER"] = os.path.join(
+    BASE_DIR,
+    "static",
+    "uploads"
+)
+
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
+
 Bootstrap(app)
 
-# Create upload folder
-try:
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    logger.info(f"Upload folder ready: {app.config['UPLOAD_FOLDER']}")
-except Exception as e:
-    logger.error(f"Failed to create upload folder: {e}")
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-class UploadForm(FlaskForm):
-    content = FileField('Content Image')
-    style = FileField('Style Image')
-    content_path = HiddenField()
-    style_path = HiddenField()
-    alpha = FloatField('Alpha', default=1.0)
-    submit = SubmitField('Transfer Style')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-# Detect device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logger.info(f"Device: {device}")
-if device.type == 'cuda':
-    logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+logger = logging.getLogger(__name__)
 
-# Get the directory of the current script
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-logger.info(f"Base directory: {BASE_DIR}")
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
-# Global model variables
+logger.info(f"Using device: {device}")
+
 encoder = None
 decoder = None
 
-def load_models():
-    global encoder, decoder
-    try:
-        logger.info("Loading models...")
-        
-        # Load VGG encoder
-        vgg_path = os.path.join(BASE_DIR, 'vgg_normalised.pth')
-        logger.info(f"Looking for VGG at: {vgg_path}")
-        
-        if not os.path.exists(vgg_path):
-            logger.error(f"VGG not found at {vgg_path}")
-            logger.info(f"Contents of {BASE_DIR}: {os.listdir(BASE_DIR)}")
-            sys.exit(1)
-        
-        logger.info(f"VGG found, loading... (size: {os.path.getsize(vgg_path) / 1e9:.2f} GB)")
-        encoder = VGGEncoder(vgg_path, device=device).to(device)
-        logger.info("VGG Encoder loaded successfully")
-        
-        decoder = Decoder().to(device)
-        logger.info("Decoder initialized")
-        
-        # Load decoder checkpoint
-        checkpoint_dir = os.path.join(BASE_DIR, 'experiment', 'final_exp')
-        checkpoint_path = os.path.join(checkpoint_dir, 'decoder_final.pth')
-        
-        logger.info(f"Looking for checkpoint at: {checkpoint_path}")
-        
-        if not os.path.exists(checkpoint_path):
-            logger.warning(f"Checkpoint not found at {checkpoint_path}")
-            # Try alternatives
-            alt_paths = [
-                os.path.join(BASE_DIR, 'experiment', 'final_exp', 'decoder_1.pth'),
-                os.path.join(BASE_DIR, 'experiment', 'decoder_final.pth'),
-            ]
-            checkpoint_path = None
-            for alt_path in alt_paths:
-                if os.path.exists(alt_path):
-                    checkpoint_path = alt_path
-                    logger.info(f"Found checkpoint at: {checkpoint_path}")
-                    break
-            
-            if not checkpoint_path:
-                logger.error("No decoder checkpoint found!")
-                logger.info(f"Contents of experiment dir: {os.listdir(os.path.join(BASE_DIR, 'experiment')) if os.path.exists(os.path.join(BASE_DIR, 'experiment')) else 'N/A'}")
-                return False
-        
-        logger.info(f"Loading checkpoint... (size: {os.path.getsize(checkpoint_path) / 1e6:.2f} MB)")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        logger.info(f"Checkpoint type: {type(checkpoint)}")
-        
-        if isinstance(checkpoint, dict) and ('state_dict' in checkpoint or 'model' in checkpoint):
-            state = checkpoint.get('state_dict', checkpoint.get('model'))
-        else:
-            state = checkpoint
-        
-        decoder.load_state_dict(state)
-        encoder.eval()
-        decoder.eval()
-        
-        logger.info("✓ Models loaded successfully")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error loading models: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
-# Load models on startup
-if not load_models():
-    logger.error("Failed to load models. App cannot start.")
-    sys.exit(1)
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
 
-def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
+
+def transform_image(image):
+    image = image.convert("RGB")
+    image = image.resize((128, 128))
+    image = np.array(image).astype(np.float32) / 255.0
+    tensor = torch.from_numpy(image)
+    tensor = tensor.permute(2, 0, 1)
+    return tensor
+
+
+def tensor_to_pil(image):
+    image = image.cpu().clone().squeeze(0).clamp(0, 1)
+    image = image.permute(1, 2, 0).numpy()
+    image = (image * 255).astype(np.uint8)
+    return Image.fromarray(image)
+
+
+def load_models():
+    global encoder
+    global decoder
+
     try:
-        logger.info("Starting style transfer...")
+        logger.info("Loading models...")
 
-        transform = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor()
-        ])
+        vgg_path = os.path.join(
+            BASE_DIR,
+            "vgg_normalised.pth"
+        )
 
-        logger.info("Converting content image to tensor...")
-        content_tensor = transform(content_image).unsqueeze(0).to(device)
+        if not os.path.exists(vgg_path):
+            raise FileNotFoundError(
+                f"VGG model not found: {vgg_path}"
+            )
 
-        logger.info("Converting style image to tensor...")
-        style_tensor = transform(style_image).unsqueeze(0).to(device)
+        encoder = VGGEncoder(
+            vgg_path,
+            device=device
+        ).to(device)
 
-        logger.info(f"Content shape: {content_tensor.shape}")
-        logger.info(f"Style shape: {style_tensor.shape}")
+        decoder = Decoder().to(device)
+
+        checkpoint_dir = os.path.join(
+            BASE_DIR,
+            "experiment",
+            "final_exp"
+        )
+
+        checkpoint_path = os.path.join(
+            checkpoint_dir,
+            "decoder_final.pth"
+        )
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(
+                f"Decoder checkpoint not found: {checkpoint_path}"
+            )
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device
+        )
+
+        if isinstance(checkpoint, dict):
+            if "state_dict" in checkpoint:
+                state = checkpoint["state_dict"]
+            elif "model_state_dict" in checkpoint:
+                state = checkpoint["model_state_dict"]
+            elif "decoder" in checkpoint:
+                state = checkpoint["decoder"]
+            else:
+                state = checkpoint
+        else:
+            state = checkpoint
+
+        if isinstance(state, dict):
+            state = {
+                key.replace("module.", "", 1): value
+                for key, value in state.items()
+            }
+
+        decoder.load_state_dict(state)
+
+        encoder.eval()
+        decoder.eval()
+
+        logger.info("Models loaded successfully.")
+
+    except Exception as e:
+        logger.error("Failed to load models.")
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
+        raise
+
+
+try:
+    load_models()
+except Exception:
+    logger.error("Application startup failed.")
+    sys.exit(1)
+
+
+class UploadForm(FlaskForm):
+    content_image = FileField(
+        "Content Image",
+        validators=[DataRequired()]
+    )
+
+    style_image = FileField(
+        "Style Image",
+        validators=[DataRequired()]
+    )
+
+    submit = SubmitField("Apply Style")
+
+
+def style_transfer(content_image, style_image, alpha=1.0):
+    try:
+        if encoder is None or decoder is None:
+            raise RuntimeError("Models have not been loaded.")
+
+        content_tensor = transform_image(
+            content_image
+        ).unsqueeze(0).to(device)
+
+        style_tensor = transform_image(
+            style_image
+        ).unsqueeze(0).to(device)
 
         with torch.inference_mode():
-            logger.info("Encoding content...")
-            content_feats = encoder(content_tensor, is_test=True)
-            logger.info("Content encoded")
+            content_feats = encoder(
+                content_tensor,
+                is_test=True
+            )
 
-            logger.info("Encoding style...")
-            style_feats = encoder(style_tensor, is_test=True)
-            logger.info("Style encoded")
+            style_feats = encoder(
+                style_tensor,
+                is_test=True
+            )
 
-            logger.info("Applying AdaIN...")
             stylized_feats = adaptive_instance_normalization(
                 content_feats,
                 style_feats
             )
 
             stylized_feats = (
-                alpha * stylized_feats +
-                (1 - alpha) * content_feats
+                alpha * stylized_feats
+                + (1 - alpha) * content_feats
             )
 
-            logger.info("Decoding...")
-            stylized_image = decoder(stylized_feats)
-
-        logger.info("Style transfer completed")
+            stylized_image = decoder(
+                stylized_feats
+            )
 
         return stylized_image
 
     except Exception as e:
-        logger.error(f"Style transfer error: {e}")
-        logger.error(traceback.format_exc())
-        raise
-def save_image(image, path):
-    """Save tensor to image file"""
-    try:
-        image = image.cpu().clone().squeeze(0).clamp(0, 1)
-        pil_image = transforms.ToPILImage()(image)
-        pil_image.save(path, quality=85)
-        logger.info(f"Saved image: {path}")
-    except Exception as e:
-        logger.error(f"Error saving image: {e}")
+        logger.error(
+            f"Style transfer failed: {str(e)}"
+        )
+        logger.error(
+            traceback.format_exc()
+        )
         raise
 
-@app.route('/', methods=['GET', 'POST'])
+
+def save_image(image, path):
+    try:
+        pil_image = tensor_to_pil(image)
+
+        pil_image.save(
+            path,
+            quality=85
+        )
+
+        logger.info(
+            f"Saved image to: {path}"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to save image: {str(e)}"
+        )
+        raise
+
+
+@app.route("/", methods=["GET", "POST"])
 def index():
     form = UploadForm()
-    result_image = None
-    content_filename = None
-    style_filename = None
-    error = None
-
-    logger.info(f"Route / accessed, method: {request.method}")
 
     if form.validate_on_submit():
+        content_file = form.content_image.data
+        style_file = form.style_image.data
+
+        if not content_file or not style_file:
+            flash(
+                "Please upload both images.",
+                "danger"
+            )
+            return redirect(url_for("index"))
+
+        if not allowed_file(content_file.filename):
+            flash(
+                "Invalid content image format.",
+                "danger"
+            )
+            return redirect(url_for("index"))
+
+        if not allowed_file(style_file.filename):
+            flash(
+                "Invalid style image format.",
+                "danger"
+            )
+            return redirect(url_for("index"))
+
         try:
-            logger.info("Form submitted")
-            
-            # Handle content image
-            if form.content.data and form.content.data.filename:
-                logger.info(f"Content file received: {form.content.data.filename}")
-                if allowed_file(form.content.data.filename):
-                    content_filename = secure_filename(form.content.data.filename)
-                    content_path = os.path.join(app.config['UPLOAD_FOLDER'], content_filename)
-                    form.content.data.save(content_path)
-                    logger.info(f"Content saved: {content_path}")
-                    form.content_path.data = content_filename
-                else:
-                    error = 'Invalid content image format'
-            else:
-                content_filename = form.content_path.data
-                logger.info(f"Using existing content: {content_filename}")
+            content_filename = secure_filename(
+                content_file.filename
+            )
 
-            # Handle style image
-            if form.style.data and form.style.data.filename:
-                logger.info(f"Style file received: {form.style.data.filename}")
-                if allowed_file(form.style.data.filename):
-                    style_filename = secure_filename(form.style.data.filename)
-                    style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
-                    form.style.data.save(style_path)
-                    logger.info(f"Style saved: {style_path}")
-                    form.style_path.data = style_filename
-                else:
-                    error = 'Invalid style image format'
-            else:
-                style_filename = form.style_path.data
-                logger.info(f"Using existing style: {style_filename}")
+            style_filename = secure_filename(
+                style_file.filename
+            )
 
-            if not error and content_filename and style_filename:
-                content_path = os.path.join(app.config['UPLOAD_FOLDER'], content_filename)
-                style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
-                
-                if not os.path.exists(content_path):
-                    error = 'Content image not found'
-                elif not os.path.exists(style_path):
-                    error = 'Style image not found'
-                else:
-                    try:
-                        logger.info("Opening images...")
-                        content_image = Image.open(content_path).convert('RGB')
-                        style_image = Image.open(style_path).convert('RGB')
-                        
-                        alpha = float(form.alpha.data) if form.alpha.data else 1.0
-                        if not (0 <= alpha <= 1):
-                            alpha = 1.0
-                        
-                        logger.info(f"Processing with alpha={alpha}")
-                        stylized_image = style_transfer(content_image, style_image, encoder, decoder, alpha, device)
-                        
-                        result_filename = 'stylized_' + content_filename
-                        result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
-                        save_image(stylized_image, result_path)
-                        result_image = result_filename
-                        logger.info(f"✓ Success: {result_filename}")
-                        
-                    except Exception as e:
-                        error = f'Processing error: {str(e)}'
-                        logger.error(error)
-            elif not error:
-                if not content_filename:
-                    error = 'Please upload content image'
-                elif not style_filename:
-                    error = 'Please upload style image'
-                    
+            content_path = os.path.join(
+                app.config["UPLOAD_FOLDER"],
+                "content_" + content_filename
+            )
+
+            style_path = os.path.join(
+                app.config["UPLOAD_FOLDER"],
+                "style_" + style_filename
+            )
+
+            content_file.save(content_path)
+            style_file.save(style_path)
+
+            content_image = Image.open(
+                content_path
+            ).convert("RGB")
+
+            style_image = Image.open(
+                style_path
+            ).convert("RGB")
+
+            result = style_transfer(
+                content_image,
+                style_image,
+                alpha=1.0
+            )
+
+            output_filename = (
+                "result_"
+                + content_filename.rsplit(".", 1)[0]
+                + "_"
+                + style_filename.rsplit(".", 1)[0]
+                + ".jpg"
+            )
+
+            output_path = os.path.join(
+                app.config["UPLOAD_FOLDER"],
+                output_filename
+            )
+
+            save_image(
+                result,
+                output_path
+            )
+
+            return render_template(
+                "index.html",
+                form=form,
+                result_image=url_for(
+                    "static",
+                    filename="uploads/" + output_filename
+                ),
+                content_image=url_for(
+                    "static",
+                    filename="uploads/content_" + content_filename
+                ),
+                style_image=url_for(
+                    "static",
+                    filename="uploads/style_" + style_filename
+                )
+            )
+
         except Exception as e:
-            error = f'Unexpected error: {str(e)}'
-            logger.error(error)
-            logger.error(traceback.format_exc())
-    else:
-        if request.method == 'POST':
-            logger.warning("Form validation failed")
-            error = 'Form validation failed'
+            logger.error(
+                f"Error processing images: {str(e)}"
+            )
+
+            logger.error(
+                traceback.format_exc()
+            )
+
+            flash(
+                "An error occurred while processing the images.",
+                "danger"
+            )
+
+            return redirect(url_for("index"))
 
     return render_template(
-        'index.html',
-        form=form,
-        result_image=result_image,
-        content_image=content_filename,
-        style_image=style_filename,
-        error=error
+        "index.html",
+        form=form
     )
 
-@app.route('/uploads/<filename>')
-def send_image(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-@app.route('/examples/<path:filename>')
-def send_example(filename):
-    return send_from_directory('examples', filename)
+@app.route("/examples/<path:filename>")
+def examples(filename):
+    return send_from_directory(
+        os.path.join(BASE_DIR, "examples"),
+        filename
+    )
 
-@app.route('/health')
+
+@app.route("/health")
 def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'ok', 'device': str(device)}), 200
+    return {
+        "status": "ok",
+        "device": str(device),
+        "models_loaded": (
+            encoder is not None
+            and decoder is not None
+        )
+    }
+
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    return 'File too large. Maximum file size is 16MB.', 413
+    flash(
+        "File is too large. Maximum size is 16 MB.",
+        "danger"
+    )
+
+    return redirect(url_for("index"))
+
 
 @app.errorhandler(500)
-def internal_error(error):
-    logger.error(f'Internal server error: {error}')
-    logger.error(traceback.format_exc())
-    return 'An internal error occurred. Please try again.', 500
+def internal_server_error(error):
+    logger.error(
+        f"Internal server error: {error}"
+    )
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    return render_template(
+        "index.html",
+        form=UploadForm(),
+        error="Internal server error."
+    ), 500
+
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get("PORT", 5000)
+        ),
+        debug=False
+    )
