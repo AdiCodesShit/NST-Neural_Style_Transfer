@@ -319,6 +319,4 @@ def internal_error(error):
     return 'An internal error occurred. Please try again.', 500
 
 if __name__ == '__main__':
-    logger.info("Running Flask app locally (not for production)")
-    from werkzeug.serving import run_simple
-    run_simple('localhost', 5000, app, use_reloader=True, use_debugger=True)
+    app.run(debug=True)
